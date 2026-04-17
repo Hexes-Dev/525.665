@@ -1,0 +1,8 @@
+numpy
+torch
+pandas
+plotly
+dash
+dash-html-components
+dash-core-components
+dash-renderer
