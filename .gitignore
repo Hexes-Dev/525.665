@@ -1,2 +1,5 @@
 data/*.db
 data/imu_logs/*
+*.idea
+*.DS_Store
+*.docx

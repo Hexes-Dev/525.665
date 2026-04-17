@@ -1,5 +1,3 @@
-# How do I build this?
-
 ## Data
 #### 9 DOF data
 - 3 axis IMU data
@@ -11,6 +9,3 @@
 - Position (lat, lon)
 - True Course (deg)
 - Speed (m/s)
-
-#### Output formatting
-- Change in 
