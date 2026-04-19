@@ -3,7 +3,7 @@ import io
 import re
 from dataclasses import dataclass, field, astuple
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Callable, Any
 from datetime import datetime, timezone
 import traceback
 import sqlite3
@@ -50,8 +50,8 @@ class GPSReading:
     timestamp: datetime = datetime(1970, 1, 1)
 
 SENSOR_LIST = [
-    # "icm_20948_1",
-    # "icm_20948_2",
+    "icm_20948_1",
+    "icm_20948_2",
     "lsm6dsox_3",
     "lsm6dsox_4",
     "lsm6dsox_5",
@@ -444,6 +444,57 @@ class Database:
             print(f"Error querying GPS data: {e}")
             return []
 
+
+    def iterate_batches(
+        self,
+        table_name: str,
+        callback: Callable[[List[Any]], None],
+        batch_size: int = 1000,
+        query_where: Optional[str] = None,
+        params: Optional[List[Any]] = None
+    ):
+        """
+        Executes a callback on batches of records from the specified table.
+
+        Args:
+            table_name: 'imu' or 'gps'.
+            callback: function receiving a list of objects (batch).
+            batch_size: number of records per batch.
+            query_where: SQL WHERE clause (without 'WHERE').
+            params: parameters for the query.
+        """
+        query = f"SELECT * FROM {table_name}"
+        if query_where:
+            query += f" WHERE {query_where}"
+
+        try:
+            self.cursor.execute(query, params or [])
+            while True:
+                rows = self.cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+
+                # Mock the query object to reuse existing conversion logic
+                class MockQuery:
+                    def fetchall(self): return rows
+
+                mock_query = MockQuery()
+
+                if table_name == 'imu':
+                    results = self.to_imu(mock_query)
+                    batch = [results] if isinstance(results, IMUReading) else results
+                elif table_name == 'gps':
+                    results = self.to_gps(mock_query)
+                    batch = [results] if isinstance(results, GPSReading) else results
+                else:
+                    raise ValueError(f"Unsupported table name: {table_name}")
+
+                callback(batch)
+        except Exception as e:
+            traceback.print_exc()
+            print(f"Error during batch processing: {e}")
+
+
 """
 Reads entries from an IMU log and returns a list of IMUReadings
 readings will be initialized with a default timestamp since IMU logs don't contain a date.
@@ -497,7 +548,7 @@ def parse_gps(line: str) -> dict:
             fix_indicator = int(data[6])
             if fix_indicator == 0:
                 return {
-                    "utc_time": data[1],
+                    "utc_time": str(data[1] or 0).zfill(6),
                     "fix_indicator": fix_indicator,
                     "latitude": 0,
                     "longitude": 0,
@@ -507,7 +558,7 @@ def parse_gps(line: str) -> dict:
                 }
 
             return {
-                "utc_time": float(data[1] or 0),
+                "utc_time": str(data[1] or 0).zfill(6),
                 "latitude": float(data[2]) if data[3] == "N" else ( - float(data[2])),
                 "longitude": float(data[4]) if data[5] == "E" else ( - float(data[4])),
                 "fix_indicator": int(data[6]),
@@ -545,9 +596,9 @@ def read_gps_log(path: Path) -> List[GPSReading]:
     with open(path, 'r') as gps_file:
 
         gps_data = None
-
+        idx = 0
         for line in gps_file:
-
+            idx += 1
             # Check if the line is the start of a fix entry
             if line.startswith('$GNGGA'):
 
@@ -567,7 +618,7 @@ def read_gps_log(path: Path) -> List[GPSReading]:
                             gps_entries.append(reading)
 
                     except Exception as e:
-                        print(e)
+                        print(f"Exception on line {idx} -- {e}")
 
                 # create a new entry using the GGA line
                 gps_data = parse_gps(line)
@@ -616,7 +667,7 @@ def ned_to_latlon(position_ned: np.ndarray, start_lat: float, start_lon: float) 
 def ddmm_to_decimal(ddmm: float) -> float:
     """
     Convert DDMM.MMMM format to decimal degrees.
-    e.g. 3410.0982 → 34.168303
+    e.g. 3410.0982 → 3                34.168303
          -11912.1792 → -119.203200
     """
     sign = -1 if ddmm < 0 else 1
@@ -638,7 +689,7 @@ def estimate_level_correction(imu_readings, n_samples=50):
     """
     acc_samples = []
     for r in imu_readings[:n_samples]:
-        acc = np.array(astuple(r.raw_accelerometer), dtype=float)
+        acc = r.raw_acc
         acc_samples.append(acc)
 
     # Mean acceleration vector while stationary
@@ -750,11 +801,7 @@ def apply_magnetometer_calibration(reading: IMUReading, calibration: dict) -> IM
         The modified IMUReading object.
     """
     # 1. Extract the raw magnetometer values into a numpy array for math
-    raw_vec = np.array([
-        reading.raw_magnetometer.x,
-        reading.raw_magnetometer.y,
-        reading.raw_magnetometer.z
-    ])
+    raw_vec = reading.raw_mag
 
     # 2. Retrieve calibration parameters
     offset = np.array(calibration['offset'])
@@ -767,11 +814,7 @@ def apply_magnetometer_calibration(reading: IMUReading, calibration: dict) -> IM
     # 4. Update the 'magnetometer' field with a new XYZ object
     # We cast to float() to ensure we store standard Python floats,
     # avoiding numpy-specific types inside our dataclass.
-    reading.magnetometer = XYZ(
-        x=float(calibrated_vec[0]),
-        y=float(calibrated_vec[1]),
-        z=float(calibrated_vec[2])
-    )
+    reading.mag = calibrated_vec
 
     return reading
 
@@ -789,16 +832,16 @@ def export_imu_readings_to_csv(imu_readings: List['IMUReading'], filename: str):
         return
 
     # 1. Define the flattened header names
-    # We expand the nested XYZ objects into individual columns for CSV compatibility
+    # Updated to match the new attribute naming convention (gyr, acc, mag, tmp)
     headers = [
-        'timestamp', 'gps_second', 'gps_time_elapsed', 'sensor_name',
-        'sensor__type', 'sensor_id',
-        'raw_gyro_x', 'raw_gyro_y', 'raw_gyro_z',
-        'raw_accel_x', 'raw_accel_y', 'raw_accel_z',
+        'timestamp', 'gps_second', 'gps_time_elapsed', 'source_time',
+        'sensor_name', 'sensor_type', 'sensor_id',
+        'raw_gyr_x', 'raw_gyr_y', 'raw_gyr_z',
+        'raw_acc_x', 'raw_acc_y', 'raw_acc_z',
         'raw_mag_x', 'raw_mag_y', 'raw_mag_z',
-        'raw_temp',
-        'gyro_x', 'gyro_y', 'gyro_z',
-        'accel_x', 'accel_y', 'accel_z',
+        'raw_tmp',
+        'gyr_x', 'gyr_y', 'gyr_z',
+        'acc_x', 'acc_y', 'acc_z',
         'mag_x', 'mag_y', 'mag_z',
         'temp'
     ]
@@ -810,29 +853,27 @@ def export_imu_readings_to_csv(imu_readings: List['IMUReading'], filename: str):
 
             for r in imu_readings:
                 # 2. Flatten the object into a single list of values
+                # Accessing elements via numpy array indexing [0, 1, 2]
                 row = [
                     r.timestamp.isoformat(),  # Convert datetime to string
                     r.gps_second,
                     r.gps_time_elapsed,
+                    r.source_time,
                     r.sensor_name,
                     r.sensor_type,
                     r.sensor_id,
-                    # Flattening raw_gyro
-                    r.raw_gyro.x, r.raw_gyro.y, r.raw_gyro.z,
-                    # Flattening raw_accelerometer
-                    r.raw_accelerometer.x, r.raw_accelerometer.y, r.raw_accelerometer.z,
-                    # Flattening raw_magnetometer
-                    r.raw_magnetometer.x, r.raw_magnetometer.y, r.raw_magnetometer.z,
-                    # Temperature
-                    r.raw_temperature,
-                    # Flattening processed gyro
-                    r.gyro.x, r.gyro.y, r.gyro.z,
-                    # Flattening processed accelerometer
-                    r.accelerometer.x, r.accelerometer.y, r.accelerometer.z,
-                    # Flattening processed magnetometer
-                    r.magnetometer.x, r.magnetometer.y, r.magnetometer.z,
+                    # Flattening raw arrays
+                    r.raw_gyr[0], r.raw_gyr[1], r.raw_gyr[2],
+                    r.raw_acc[0], r.raw_acc[1], r.raw_acc[2],
+                    r.raw_mag[0], r.raw_mag[1], r.raw_mag[2],
+                    # Raw Temperature
+                    r.raw_tmp,
+                    # Flattening processed arrays
+                    r.gyr[0], r.gyr[1], r.gyr[2],
+                    r.acc[0], r.acc[1], r.acc[2],
+                    r.mag[0], r.mag[1], r.mag[2],
                     # Final temperature
-                    r.temperature
+                    r.tmp
                 ]
                 writer.writerow(row)
 

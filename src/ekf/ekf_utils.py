@@ -3,6 +3,8 @@ import math
 from typing import List
 
 import ahrs
+
+
 from pyproj import Proj
 from scipy.spatial.transform import Rotation
 
@@ -107,12 +109,14 @@ def ekf_navigation(gyr: np.ndarray, acc: np.ndarray, mag: np.ndarray, time: np.n
 
     # Running EKF on data produced East / West mirror or GPS
     # This correction needs to be applied as part of calibration step
+
     gyr *= -1
     acc[:, [0, 1]] = acc[:, [1, 0]]
     mag[:,[0,1]] = mag[:,[1,0]]
 
     # Calculate accelerometer stationary bias using the first 100 samples
     acc_bias = np.mean(acc[:100], axis=0)
+    print(f"Bias = {acc_bias}")
 
 
     # EKF can run on 6 dof or 9 dof data. An empy mag array is used to tell it we're using 9 dof data
@@ -168,7 +172,8 @@ def ekf_navigation(gyr: np.ndarray, acc: np.ndarray, mag: np.ndarray, time: np.n
         rot_matrix = R_func.from_quat(Q[t], scalar_first=True).as_matrix()
 
         # Transform acceleration to NED frame and remove bias
-        acc_world = rot_matrix @ (acc[t] - acc_bias)
+        # acc_world = rot_matrix @ (acc[t] - acc_bias)
+        acc_world = (rot_matrix @ acc[t] - acc_bias) - [0,0,9.81]
 
         # Integrate Velocity
         V[t] = V[t - 1] + (acc_world * dt)
@@ -196,3 +201,44 @@ def ekf_to_coor(start_lat, start_lon, position):
         ekf_coor.append((lat, lon, alt))
 
     return ekf_coor
+
+
+def quaternion_to_heading(q):
+    """
+    Converts a quaternion [x, y, z, w] to a heading in degrees [0, 360).
+
+    Note: Scipy uses [x, y, z, w] format by default.
+    If your data is [w, x, y, z], you must reorder it first.
+    """
+    # 1. Handle potential input types and ensure numpy array
+    q = np.array(q)
+
+    # 2. IMPORTANT: Check your quaternion order!
+    # ahrs/EKF math often uses [w, x, y, z].
+    # Scipy's Rotation class expects [x, y, z, w].
+    # If you are sure your input is [w, x, y, z], uncomment the next line:
+    # q = q[[1, 2, 3, 0]]
+
+    try:
+        # 3. Create rotation object (Scipy handles normalization internally)
+        rotation = Rotation.from_quat(q, scalar_first=True)
+
+        # 4. Convert to Euler angles
+        # 'zyx' sequence: returns [yaw, pitch, roll] in radians
+        # Note: Scipy 'zyx' returns angles for the axes in order of rotation
+        euler_angles = rotation.as_euler('zyx', degrees=True)
+
+        # euler_angles[0] is Yaw (heading)
+        yaw = euler_angles[0]
+
+        # 5. Wrap to [0, 360)
+        return yaw % 360
+
+    except ValueError as e:
+        # This happens if the quaternion is mathematically invalid
+        # even after Scipy's internal normalization attempts.
+        print(f"Rotation error (check your quaternion integrity): {e}")
+        return 0.0
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return 0.0

@@ -4,37 +4,43 @@ from typing import List
 import numpy as np
 from numpy import random
 
-from src.data.data_utils import Database, IMUReading, estimate_level_correction, SENSOR_LIST, calibrate_magnetometer, \
-    XYZ, xyz_array, array_xyz
+from data_tools import Database, IMUReading, estimate_level_correction, SENSOR_LIST, calibrate_magnetometer
 
 
 def main():
-    db = Database("../../data/data.db")
+    db = Database("data/dataset.db")
 
     # Load all gps records
-    gps_readings = db.read_gps()
+    gps_readings = db.get_gps_readings()
+    gps_readings = sorted(gps_readings, key=lambda r: r.timestamp)
     print(f"Found {len(gps_readings)} GPS readings")
 
+    timeframe_start = None
+    zero_speed_seconds = 0
     zero_speed_timeframes = []
     for idx, reading in enumerate(gps_readings):
         if idx == len(gps_readings) - 1:
             continue
 
-        next_reading = gps_readings[idx + 1]
-        if reading.speed <= 0.01 and next_reading.speed <= 0.01:
-            zero_speed_timeframes.append((reading.timestamp, next_reading.timestamp))
+        if reading.speed <= 0.01 and timeframe_start is None:
+            timeframe_start = idx
 
-    print(f"Found {len(zero_speed_timeframes)} zero speed timeframes")
+        if reading.speed > 0.01 and timeframe_start is not None:
+            zero_speed_seconds += (gps_readings[idx-1].timestamp - gps_readings[timeframe_start].timestamp).total_seconds()
+            zero_speed_timeframes.append((gps_readings[timeframe_start].timestamp, gps_readings[idx-1].timestamp))
+            timeframe_start = None
+
+    print(f"Found {len(zero_speed_timeframes)} zero speed timeframes -- {zero_speed_seconds} seconds of data.")
 
     zero_speed_imu: List[IMUReading] = []
-    for timeframe in zero_speed_timeframes:
+    for idx, timeframe in enumerate(zero_speed_timeframes):
         start_time, end_time = timeframe
-        new_imu_entries = db.read_imu(start_time=start_time, end_time=end_time)
+        new_imu_entries = db.get_imu_readings(start_datetime=start_time, end_datetime=end_time)
         if not new_imu_entries:
             continue
         zero_speed_imu = zero_speed_imu + new_imu_entries
 
-        print(f"\rFound {len(new_imu_entries)} new IMU entries between {start_time} and {end_time} -- Total: {len(zero_speed_imu)}", end="", flush=True)
+        print(f"\033[KFound {len(new_imu_entries)} new IMU entries between {start_time} and {end_time} -- Total: {len(zero_speed_imu)}", end="\r", flush=True)
 
     print(f"Total zero speed entries: {len(zero_speed_imu)}")
 
@@ -49,31 +55,32 @@ def main():
     sensor_magnetic_correction = {}
     for sensor in SENSOR_LIST:
         print(f"Reading entries for magnetic calibration of {sensor}")
-        imu_readings = db.read_imu(sensor_name=sensor)
+        imu_readings = db.get_imu_readings(sensor_name=sensor)
 
-        print(f"Solving magnetic calibration for {sensor}")
+        print(f"Solving magnetic calibration for {sensor} using {len(imu_readings)} readings")
         # Apply rotation matrix prior to magnetic calibration
         r_level = sensor_rotation_matrix[sensor]
         for idx, reading in enumerate(imu_readings):
-            gyro = r_level @ np.array(astuple(reading.raw_gyro), dtype=float)
-            accel = r_level @ np.array(astuple(reading.raw_accelerometer), dtype=float)
-            mag = r_level @ np.array(astuple(reading.raw_magnetometer), dtype=float)
+            gyr = r_level @ reading.raw_gyr
+            acc = r_level @ reading.raw_acc
+            mag = r_level @ reading.raw_mag
 
-            imu_readings[idx].accelerometer = XYZ(*accel)
-            imu_readings[idx].gyro = XYZ(*gyro)
-            imu_readings[idx].magnetometer = XYZ(*mag)
+            imu_readings[idx].acc = acc
+            # imu_readings[idx].gyr = gyr
+            imu_readings[idx].mag = mag
 
-        oriented_magnetometer_readings = [xyz_array(imu.magnetometer) for imu in imu_readings]
+        oriented_magnetometer_readings = [imu.mag for imu in imu_readings]
         sensor_magnetic_correction[sensor] = calibrate_magnetometer(oriented_magnetometer_readings)
-        print(sensor_magnetic_correction[sensor])
+        print(sensor_magnetic_correction[sensor]['offset'])
+        print(sensor_magnetic_correction[sensor]['scale_matrix'])
 
         print(f"Applying calibration for {sensor}")
         for idx, reading in enumerate(imu_readings):
             offset = np.array(sensor_magnetic_correction[sensor]['offset'])
             scale_matrix = np.array(sensor_magnetic_correction[sensor]['scale_matrix'])
 
-            calibrated_magnetometer = (raw_vector := xyz_array(reading.magnetometer) - offset) @ scale_matrix.T
-            imu_readings[idx].magnetometer = array_xyz(calibrated_magnetometer)
+            calibrated_magnetometer = (raw_vector := reading.mag - offset) @ scale_matrix.T
+            imu_readings[idx].mag = calibrated_magnetometer
 
             sensor_id = reading.sensor_name.split('_')[-1]
             sensor_type = "_".join(reading.sensor_type.split('_')[:-1])
