@@ -110,12 +110,13 @@ def ekf_navigation(gyr: np.ndarray, acc: np.ndarray, mag: np.ndarray, time: np.n
     # Running EKF on data produced East / West mirror or GPS
     # This correction needs to be applied as part of calibration step
 
-    gyr *= -1
-    acc[:, [0, 1]] = acc[:, [1, 0]]
-    mag[:,[0,1]] = mag[:,[1,0]]
+    # gyr *= -1
+    # acc[:, [0, 1]] = acc[:, [1, 0]]
+    # mag[:,[0,1]] = mag[:,[1,0]]
 
     # Calculate accelerometer stationary bias using the first 100 samples
     acc_bias = np.mean(acc[:100], axis=0)
+    gyro_bias = np.mean(gyr[:100], axis=0)
     print(f"Bias = {acc_bias}")
 
 
@@ -138,6 +139,8 @@ def ekf_navigation(gyr: np.ndarray, acc: np.ndarray, mag: np.ndarray, time: np.n
 
     for t in range(number_of_samples):
 
+        clean_gyr = gyr[t] - gyro_bias
+
         # Normalize acceleration and magnetic readings
         acc_norm = acc[t] / np.linalg.norm(acc[t])
         mag_norm = mag[t] / np.linalg.norm(mag[t])
@@ -146,7 +149,7 @@ def ekf_navigation(gyr: np.ndarray, acc: np.ndarray, mag: np.ndarray, time: np.n
         if t == 0:
             Q[t] = filter.update(
                 Q[0],
-                gyr[t],
+                clean_gyr,
                 acc_norm,
                 mag_norm,
                 dt=0
@@ -172,8 +175,11 @@ def ekf_navigation(gyr: np.ndarray, acc: np.ndarray, mag: np.ndarray, time: np.n
         rot_matrix = R_func.from_quat(Q[t], scalar_first=True).as_matrix()
 
         # Transform acceleration to NED frame and remove bias
-        # acc_world = rot_matrix @ (acc[t] - acc_bias)
-        acc_world = (rot_matrix @ acc[t] - acc_bias) - [0,0,9.81]
+        acc_world = rot_matrix @ (acc[t] - acc_bias)
+        # acc_world = (rot_matrix @ acc[t] - acc_bias) - [0,0,9.81]
+
+        if np.absolute(acc_world).all() < 0.3 and np.absolute(clean_gyr).all() < 0.05:
+            continue
 
         # Integrate Velocity
         V[t] = V[t - 1] + (acc_world * dt)
@@ -182,14 +188,14 @@ def ekf_navigation(gyr: np.ndarray, acc: np.ndarray, mag: np.ndarray, time: np.n
         P[t] = P[t - 1] + V[t] * dt
 
         # Print update info
-        if t % 1000 == 0 :
-            print(f"\tEKF Checkpoint {t}")
-            print(f"\t\tAcceleration Estimate: {acc_world}")
-            print(f"\t\tVelocity Estimate: {V[t]}")
-            mag_e = math.degrees(math.atan2(mag[t, 1], mag[t, 0])) % 360
-            print(f"\t\tMagnetic Course Estimate: {mag_e}")
-            vel_e = math.degrees(math.atan2(V[t, 1], V[t, 0])) % 360
-            print(f"\t\tVelocity Course Estimate: {vel_e}")
+        # if t % 1000 == 0 :
+        #     print(f"\tEKF Checkpoint {t}")
+        #     print(f"\t\tAcceleration Estimate: {acc_world}")
+        #     print(f"\t\tVelocity Estimate: {V[t]}")
+        #     mag_e = math.degrees(math.atan2(mag[t, 1], mag[t, 0])) % 360
+        #     print(f"\t\tMagnetic Course Estimate: {mag_e}")
+        #     vel_e = math.degrees(math.atan2(V[t, 1], V[t, 0])) % 360
+        #     print(f"\t\tVelocity Course Estimate: {vel_e}")
 
     return Q, V, P
 

@@ -1,9 +1,11 @@
 import csv
 import io
+import json
 import re
+import logging
 from dataclasses import dataclass, field, astuple
 from pathlib import Path
-from typing import List, Optional, Callable, Any
+from typing import List, Optional, Callable, Any, TYPE_CHECKING
 from datetime import datetime, timezone
 import traceback
 import sqlite3
@@ -74,7 +76,21 @@ sqlite3.register_adapter(np.ndarray, adapt_array)
 sqlite3.register_converter("array", convert_array)
 
 class Database:
-    def __init__(self, db_path: str):
+    calibration_data = None
+
+    def __init__(self, db_path: str, calibration_file: str = None):
+
+        try:
+            # load calibration data
+            if calibration_file is not None:
+                self.calibration_data = json.loads(Path(calibration_file).read_text())
+                for sensor in self.calibration_data.keys():
+                    for matrix in self.calibration_data[sensor].keys():
+                        self.calibration_data[sensor][matrix] = np.array(self.calibration_data[sensor][matrix])
+
+        except Exception as e:
+            print(e)
+
         # Create a database and tables if they don't exist
         try:
 
@@ -212,11 +228,11 @@ class Database:
             traceback.print_exc()
             print("Failed to write imu entry to database")
 
-    def to_gps(self, query) -> GPSReading | List[GPSReading]:
+    def to_gps(self, rows) -> GPSReading | List[GPSReading]:
         """
         Converts the results of a GPS query to a single GPSReading or a List of GPSReadings.
         """
-        rows = query.fetchall()
+        # rows = query.fetchall()
         if not rows:
             return []
 
@@ -247,12 +263,12 @@ class Database:
         return results[0] if len(array_results := results) == 1 else results
 
 
-    def to_imu(self, query) -> IMUReading | List[IMUReading]:
+    def to_imu(self, rows) -> IMUReading | List[IMUReading]:
         """
         Converts the results of an IMU query to a single IMUReading or a List of IMUReadings.
         Reconstructs the concatenated arrays back into gyr, acc, mag, and tmp components.
         """
-        rows = query.fetchall()
+        # rows = query.fetchall()
         if not rows:
             return []
 
@@ -282,6 +298,29 @@ class Database:
 
             raw_gyr, raw_acc, raw_mag, raw_tmp = unpack_array(raw_arr)
             cal_gyr, cal_acc, cal_mag, cal_tmp = unpack_array(cal_arr)
+
+            # Calibrate if available
+            if self.calibration_data is not None:
+                rotation_matrix, magnetic_offset, magnetic_scale_matrix = self.calibration_data[name].values()
+
+                cal_acc = rotation_matrix @ raw_acc
+                cal_gyr = rotation_matrix @ raw_gyr
+                cal_mag = rotation_matrix @ raw_mag
+
+                cal_mag = (raw_vector := cal_mag - magnetic_offset) @ magnetic_scale_matrix.T
+
+                if "lsm6dsox" in name:
+                    cal_gyr *= -1
+                    cal_acc[[0,1]] = cal_acc[[1,0]]
+                    cal_mag[[0,1]] = cal_mag[[1,0]]
+                elif "icm_20948" in name:
+                    cal_gyr *= -1
+                    cal_acc[1] *= -1
+                    cal_acc[[0,1]] = cal_acc[[1,0]]
+                    cal_mag[[0,1]] = cal_mag[[1,0]]
+                    pass
+                
+                cal_tmp = raw_tmp
 
             reading = IMUReading(
                 timestamp=ts,
@@ -355,7 +394,7 @@ class Database:
 
         try:
             self.cursor.execute(query, params)
-            return self.to_imu(self.cursor)
+            return self.to_imu(self.cursor.fetchall())
         except Exception as e:
             traceback.print_exc()
             print(f"Error querying IMU data: {e}")
@@ -438,7 +477,7 @@ class Database:
 
         try:
             self.cursor.execute(query, params)
-            return self.to_gps(self.cursor)
+            return self.to_gps(self.cursor.fetchall())
         except Exception as e:
             traceback.print_exc()
             print(f"Error querying GPS data: {e}")
@@ -448,51 +487,112 @@ class Database:
     def iterate_batches(
         self,
         table_name: str,
-        callback: Callable[[List[Any]], None],
+        callback: Callable[[List[Any], int, int], None],
         batch_size: int = 1000,
-        query_where: Optional[str] = None,
-        params: Optional[List[Any]] = None
+        query_where_clause: Optional[str] = None,
+        query_params: Optional[List[Any]] = None,
+        sort_column: str = "timestamp"
     ):
         """
-        Executes a callback on batches of records from the specified table.
+        Executes a callback on batches of records using Keyset Pagination (Seek Method).
+        This is highly performant for large datasets as it avoids 'OFFSET' and
+        large result set overhead.
 
         Args:
             table_name: 'imu' or 'gps'.
-            callback: function receiving a list of objects (batch).
+            callback: function receiving (batch, current_index, total_count_or_none).
             batch_size: number of records per batch.
-            query_where: SQL WHERE clause (without 'WHERE').
-            params: parameters for the query.
+            query_where_clause: SQL condition snippet (e.g., "sensor_id = ?").
+            query_params: Parameters for the query_where_clause.
+            sort_column: The column to use for seeking (must be indexed).
         """
-        query = f"SELECT * FROM {table_name}"
-        if query_where:
-            query += f" WHERE {query_where}"
+        if table_name not in ['imu', 'gps']:
+            raise ValueError(f"Unsupported table name: {table_name}")
+
+        # 1. Define Base Query
+        if table_name == 'gps':
+            base_query = """
+                SELECT timestamp, latitude, longitude, altitude, fix_indicator, 
+                       satellite_count, geoid_separation, pdop, hdop, vdop, 
+                       course, speed, utc_time, date 
+                FROM gps
+            """
+        else:
+            base_query = """
+                SELECT timestamp, source_time, gps_second, gps_time_elapsed, 
+                       sensor_name, sensor_type, sensor_id, raw_data, cal_data 
+                FROM imu
+            """
+
+        # 2. Prepare the WHERE clause for the initial query
+        # We use a list of conditions so we can append our 'seek' condition safely
+        conditions = []
+        params = list(query_params) if query_params else []
+
+        if query_where_clause:
+            conditions.append(f"({query_where_clause})")
+
+        # 3. Setup Pagination State
+        last_seen_value = None
+        current_index = 0
+
+        # Note: In a true Seek Method, we don't know the total count without a scan.
+        # We pass None or use a separate fast COUNT(*) if absolutely necessary.
+        count_query = f"SELECT COUNT(*) FROM {table_name}"
+        if conditions:
+            count_query += " WHERE " + " AND ".join(conditions)
+        self.cursor.execute(count_query, params or [])
+        total_count = self.cursor.fetchone()[0]
+
+        print(f"Running batch query for {total_count} records with {batch_size} records per batch")
 
         try:
-            self.cursor.execute(query, params or [])
             while True:
-                rows = self.cursor.fetchmany(batch_size)
+                # 4. Construct the Paginated Query
+                # We append "AND {sort_column} > ?" to jump straight to the next record
+                current_conditions = list(conditions)
+                current_params = list(params)
+
+                if last_seen_value is not None:
+                    current_conditions.append(f"{sort_column} > ?")
+                    current_params.append(last_seen_value)
+
+                query = base_query
+                if current_conditions:
+                    query += " WHERE " + " AND ".join(current_conditions)
+
+                # Always order by the sort column to ensure deterministic pagination
+                query += f" ORDER BY {sort_column} ASC LIMIT ?"
+                current_params.append(batch_size)
+
+                # 5. Execute and Fetch
+                self.cursor.execute(query, current_params)
+                rows = self.cursor.fetchall()
+
                 if not rows:
-                    break
+                    break  # No more data to process
 
-                # Mock the query object to reuse existing conversion logic
-                class MockQuery:
-                    def fetchall(self): return rows
-
-                mock_query = MockQuery()
-
+                # 6. Transform Rows to Objects
                 if table_name == 'imu':
-                    results = self.to_imu(mock_query)
+                    results = self.to_imu(rows)
                     batch = [results] if isinstance(results, IMUReading) else results
-                elif table_name == 'gps':
-                    results = self.to_gps(mock_query)
+                else:  # gps
+                    results = self.to_gps(rows)
                     batch = [results] if isinstance(results, GPSReading) else results
-                else:
-                    raise ValueError(f"Unsupported table name: {table_name}")
 
-                callback(batch)
+                # 7. Execute Callback
+                callback(batch, current_index, total_count)
+
+                # 8. Update state for next iteration
+                current_index += len(rows)
+
+                # The 'seek' value is the sort column of the last record in this batch
+                # We assume row[0] is timestamp based on your SELECT structure
+                last_seen_value = rows[-1][0]
+
         except Exception as e:
-            traceback.print_exc()
-            print(f"Error during batch processing: {e}")
+            print(f"Error during keyset pagination on {table_name}: {e}")
+            raise
 
 
 """
@@ -609,7 +709,7 @@ def read_gps_log(path: Path) -> List[GPSReading]:
                         reading = GPSReading(**gps_data)
 
                         # update timestamp using data
-                        timestring = f"{gps_data.get("utc_time")} {gps_data.get("date")}"
+                        timestring = f"{gps_data.get('utc_time')} {gps_data.get('date')}"
                         reading.timestamp = datetime.strptime(timestring, '%H%M%S.%f %d%m%y')
                         reading.timestamp.replace(tzinfo=timezone.utc)
 
@@ -634,6 +734,15 @@ def read_gps_log(path: Path) -> List[GPSReading]:
 
     return gps_entries
 
+
+def latlon_to_ned(current_lat: float, current_lon: float, current_alt: float, start_lat: float, start_lon: float, start_alt: float) -> np.ndarray:
+    """
+    Convert a GPS point (lat, lon, alt) to NED coordinates relative to a starting origin.
+    """
+    proj = Proj(f"+proj=aeqd +lat_0={start_lat} +lon_0={start_lon} +units=m")
+    east, north = proj(current_lon, current_lat)
+    down = start_alt - current_alt
+    return np.array([north, east, down])
 
 def ned_to_latlon(position_ned: np.ndarray, start_lat: float, start_lon: float) -> tuple[float, float, float]:
     """

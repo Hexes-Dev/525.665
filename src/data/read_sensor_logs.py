@@ -90,48 +90,6 @@ if __name__ == "__main__":
                 time_modifier = 0
                 start_index = None
 
-        # for index, imu_entry in enumerate(imu_entries):
-        #
-        #     if index % 1000 == 0:
-        #         print(f"\tAligning timestamps {index}/{len(imu_entries)} -- {100 * (index/len(imu_entries)):.2f}%", end='\r', flush=True)
-        #
-        #     # skip entries that don't match a gps entry
-        #     if not float(imu_entry.gps_second) in time_hash:
-        #         imu_entry.timestamp = None
-        #         continue
-        #
-        #     # Check if this is the first in the series
-        #     if not imu_entry.gps_second == prev_gps_second:
-        #
-        #         # If previous entries were modified we need to shift them by half the delta between the first in the new second
-        #         if time_modifier > 0 and not imu_entries[index - 1].timestamp is None:
-        #             timestamp = time_hash.get(imu_entry.gps_second) + timedelta(microseconds=int(imu_entry.gps_time_elapsed))
-        #             dt = (timestamp - imu_entries[index - 1].timestamp).total_seconds()
-        #
-        #             for i in range(gps_second_start_index, index):
-        #                 if imu_entries[i].gps_second == prev_gps_second:
-        #                     imu_entries[i].timestamp += timedelta(seconds=float(dt / 2))
-        #
-        #             time_modifier = 0
-        #             gps_second_start_index = index
-        #
-        #         prev_gps_second = imu_entry.gps_second
-        #
-        #     imu_entry.timestamp = time_hash.get(imu_entry.gps_second)
-        #     imu_entry.timestamp += timedelta(microseconds=int(imu_entry.gps_time_elapsed))
-        #     imu_entry.timestamp += timedelta(seconds=int(time_modifier))
-        #
-        #     if index == 0 or imu_entries[index - 1].timestamp is None:
-        #         continue
-        #
-        #     # calculate the time elapsed between samples
-        #     dt = (imu_entry.timestamp - imu_entries[index - 1].timestamp).total_seconds()
-        #
-        #     # if time is negative roll delta into this second
-        #     if dt < 0:
-        #         time_modifier = -1 * dt
-        #         imu_entry.timestamp += timedelta(seconds=int(time_modifier))
-
 
         # some imu readings were taken before valid fix and may not have a matching gps entry
         # filter entries that do not have valid matches

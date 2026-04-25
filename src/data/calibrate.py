@@ -1,3 +1,4 @@
+import json
 from dataclasses import astuple
 from typing import List
 
@@ -6,9 +7,13 @@ from numpy import random
 
 from data_tools import Database, IMUReading, estimate_level_correction, SENSOR_LIST, calibrate_magnetometer
 
+db_file = "data/dataset.db"
+calibration_file = "data/calibration.json"
+
+calibration_data = {}
 
 def main():
-    db = Database("data/dataset.db")
+    db = Database(db_file)
 
     # Load all gps records
     gps_readings = db.get_gps_readings()
@@ -44,54 +49,76 @@ def main():
 
     print(f"Total zero speed entries: {len(zero_speed_imu)}")
 
-    sensor_rotation_matrix = {}
     for sensor in SENSOR_LIST:
+        calibration_data[sensor] = {}
         print(f"Solving orientation calibration for {sensor}")
         per_sensor_imu = [reading for reading in zero_speed_imu if reading.sensor_name == sensor]
         random_samples = random.choice(per_sensor_imu, size=int(0.75*len(per_sensor_imu)))
-        sensor_rotation_matrix[sensor] = estimate_level_correction(random_samples, len(random_samples))
-        print(sensor_rotation_matrix[sensor])
+        calibration_data[sensor]['rotation_matrix'] = estimate_level_correction(random_samples, len(random_samples)).tolist()
 
-    sensor_magnetic_correction = {}
     for sensor in SENSOR_LIST:
         print(f"Reading entries for magnetic calibration of {sensor}")
-        imu_readings = db.get_imu_readings(sensor_name=sensor)
+        sensor_readings = [imu for imu in zero_speed_imu if imu.sensor_name == sensor]
 
-        print(f"Solving magnetic calibration for {sensor} using {len(imu_readings)} readings")
+        print(f"Solving magnetic calibration for {sensor} using {len(sensor_readings)} readings")
+
         # Apply rotation matrix prior to magnetic calibration
-        r_level = sensor_rotation_matrix[sensor]
-        for idx, reading in enumerate(imu_readings):
-            gyr = r_level @ reading.raw_gyr
-            acc = r_level @ reading.raw_acc
-            mag = r_level @ reading.raw_mag
+        r_level = calibration_data[sensor]['rotation_matrix']
 
-            imu_readings[idx].acc = acc
-            # imu_readings[idx].gyr = gyr
-            imu_readings[idx].mag = mag
+        oriented_magnetometer_readings = [r_level @ imu.raw_mag for imu in sensor_readings]
+        offset, scale_matrix = calibrate_magnetometer(oriented_magnetometer_readings).values()
 
-        oriented_magnetometer_readings = [imu.mag for imu in imu_readings]
-        sensor_magnetic_correction[sensor] = calibrate_magnetometer(oriented_magnetometer_readings)
-        print(sensor_magnetic_correction[sensor]['offset'])
-        print(sensor_magnetic_correction[sensor]['scale_matrix'])
+        calibration_data[sensor]['magnetic_offset'] = offset.tolist()
+        calibration_data[sensor]['magnetic_scale_matrix'] = scale_matrix.tolist()
 
-        print(f"Applying calibration for {sensor}")
-        for idx, reading in enumerate(imu_readings):
-            offset = np.array(sensor_magnetic_correction[sensor]['offset'])
-            scale_matrix = np.array(sensor_magnetic_correction[sensor]['scale_matrix'])
+        print(f"Magnetic calibrations complete:")
+        print(f"Offset: \n", offset)
+        print(f"Scaling matrix: \n", scale_matrix)
 
-            calibrated_magnetometer = (raw_vector := reading.mag - offset) @ scale_matrix.T
-            imu_readings[idx].mag = calibrated_magnetometer
+    print(f"Saving calibration data...")
 
-            sensor_id = reading.sensor_name.split('_')[-1]
-            sensor_type = "_".join(reading.sensor_type.split('_')[:-1])
-            imu_readings[idx].sensor_id = sensor_id
-            imu_readings[idx].sensor_type = sensor_type
+    with open(calibration_file, "w") as f:
+        json.dump(calibration_data, f, indent=4)
 
-        print(f"Updating database for {sensor}")
-        batch_size = 10000
-        for i in range(0, len(imu_readings), batch_size):
-            batch = imu_readings[i: i + batch_size]
-            db.write_imu(batch)
+            # print("Running batch calibration updates...")
+        # def apply_calibrations(batch, current_idx, total_count):
+        #
+        #     print(f"\033[K{current_idx}/{total_count} ({100*(current_idx/total_count):.2f}%) -- {len(batch)} in batch", end="\r", flush=True)
+        #
+        #     modified_batch = []
+        #     for sample in batch:
+        #         # apply level corrections
+        #         sample.acc = r_level @ sample.raw_acc
+        #         sample.gyr = r_level @ sample.raw_gyr
+        #         oriented_mag = r_level @ sample.raw_mag
+        #
+        #         sample.mag = (raw_vector := oriented_mag - offset) @ scale_matrix.T
+        #
+        #         modified_batch.append(sample)
+        #
+        #     db.write_imu(modified_batch)
+        #
+        # db.iterate_batches(
+        #     table_name="imu",
+        #     callback=apply_calibrations,
+        #     batch_size=1000000
+        # )
+
+
+        # print(f"Applying calibration for {sensor}")
+        # for idx, reading in enumerate(imu_readings):
+        #     offset = np.array(sensor_magnetic_correction[sensor]['offset'])
+        #     scale_matrix = np.array(sensor_magnetic_correction[sensor]['scale_matrix'])
+        #
+        #     calibrated_magnetometer = (raw_vector := reading.mag - offset) @ scale_matrix.T
+        #     imu_readings[idx].mag = calibrated_magnetometer
+        #
+        #
+        # print(f"Updating database for {sensor}")
+        # batch_size = 10000
+        # for i in range(0, len(imu_readings), batch_size):
+        #     batch = imu_readings[i: i + batch_size]
+        #     db.write_imu(batch)
 
 if __name__ == '__main__':
     main()
