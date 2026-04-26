@@ -1,0 +1,5 @@
+# AGENTS.md
+
+This project uses conda. The environment name is 525.665.FinalProject.
+
+We're building an rnn model using pytorch. The structure is currently not sufficient. The model is designed to explore the potential of using ml approaches as an ekf replacement in sensor fusion for IMUs to predict the movement of a ground vehicle. The data consists of GPS data the comes in at 1hz and imu data from six sensors that was recorded at approximately 100hz. The model should be capable of running on any arbitrary length of imu input data in produce an output that predicts the motion between the current step and the next step. The output should be in the NED frame with hidden layers feeding back into the next step of the model. During training, loss should only be calculated when all the IMU entries between consecutive GPS records have been processed. 

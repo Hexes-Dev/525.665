@@ -6,3 +6,4 @@ dash
 dash-html-components
 dash-core-components
 dash-renderer
+PyYAML

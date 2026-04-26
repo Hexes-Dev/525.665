@@ -1,0 +1,8 @@
+# Action Log
+- Initialized action log file.
+- Implemented `latlon_to_ned` in `src/data/data_tools.py`.
+- Created and iterated on `src/ml/generate_norm_params.py` to precompute Z-score normalization stats (per-sensor and global) using a representative sampling strategy based on GPS anchors.
+- Fixed a syntax error (unmatched f-string quotes) in `src/data/data_tools.py`.
+- Implemented the Smart Data Loader in `src/ml/imu_data_loader.py` featuring zero-velocity anchoring, dynamic windowing, Z-score normalization, and NED delta target generation.
+- Implemented the Auto-Regressive Recursive Network in `src/ml/imu_model.py` with an explicit feedback loop via a bottleneck layer to maintain state across sensor readings.
+- Created a training configuration system (`configs/baseline.json`) and a comprehensive training script (`src/ml/train.py`) supporting dynamic hyperparameter loading, real-time metric visualization via Matplotlib, and result persistence.

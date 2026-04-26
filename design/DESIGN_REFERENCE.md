@@ -32,7 +32,16 @@ The model uses an auto-regressive structure to maintain a persistent internal st
     3.  This creates an explicit feedback loop separate from the GRU's internal gates, allowing for more stable state tracking.
 *   **Output Head**: A linear layer mapping the final processed state to a 3D displacement vector ($\Delta \text{North, } \Delta \text{East, } \Delta \text{Down}$).
 
-## 5. Execution & Validation Pipeline
+## 5. Learned Kinematic Integrator Approach (`src/ml/imu_model_v2.py`)
+An alternative approach that mimics a State-Space Model (SSM) and kinematic integration to reduce drift.
+*   **Shared Sensor Encoder**: An MLP that maps `[SensorData, OneHot]` into a latent sensor space, allowing the model to handle per-sensor biases before fusion.
+*   **State Core**: A recurrent cell tracking internal physical states (latent Orientation and Velocity) rather than just abstract hidden features. It uses $\Delta t$ as an explicit integration factor for state updates.
+*   **Physics-Informed Output**: 
+    1.  Decodes latent orientation to a rotation matrix/quaternion.
+    2.  Transforms raw acceleration into the world frame (NED).
+    3.  Integrates world acceleration and current velocity over $\Delta t$ to produce $\Delta \text{Position}_{\text{NED}}$.
+
+## 6. Execution & Validation Pipeline
 1.  **Parameters Generation**: Compute and save normalization stats; verify NED conversion accuracy.
 2.  **Data Pipeline implementation**: Implement anchor-based loading and target alignment.
 3.  **Model Development**: Build the recursive GRU with auto-regressive feedback and verify tensor shapes.

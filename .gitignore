@@ -3,5 +3,5 @@ data/imu_logs/*
 *.idea
 *.DS_Store
 *.docx
-design/agends.md
-design/action_log.txt
+# design/agents.md
+# design/action_log.txt

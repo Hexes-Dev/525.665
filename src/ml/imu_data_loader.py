@@ -141,11 +141,27 @@ class IMUDataset(Dataset):
         return torch.tensor(np.array(features), dtype=torch.float32), \
                torch.tensor(np.array(targets), dtype=torch.float32)
 
+def collate_fn(batch):
+    """
+    Pads sequences in a batch to the length of the longest sequence.
+    Returns padded tensors for x and y.
+    """
+    # batch is a list of tuples (x, y)
+    xs = [item[0] for item in batch]
+    ys = [item[1] for item in batch]
+    
+    # Pad x: (seq_len, dim) -> (batch, max_seq_len, dim)
+    xs_padded = torch.nn.utils.rnn.pad_sequence(xs, batch_first=True, padding_value=0.0)
+    # Pad y: (seq_len, dim) -> (batch, max_seq_len, dim)
+    ys_padded = torch.nn.utils.rnn.pad_sequence(ys, batch_first=True, padding_value=0.0)
+    
+    return xs_padded, ys_padded
+
 def get_dataloader(db_path: str, batch_size: int = 32, window_duration: float = 10.0) -> DataLoader:
     dataset = IMUDataset(db_path, window_duration=window_duration)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
-def split_imu_datasets(db_path: str, train_split: float = 0.8, **kwargs) -> tuple[IMUDataset, IMUDataset]:
+def split_imu_datasets(db_path: str, train_split: float = 0.8, seed: int = None, **kwargs) -> tuple[IMUDataset, IMUDataset]:
     """
     Splits the available zero-velocity anchors into training and testing sets.
     Returns two IMUDataset instances based on these split anchors.
@@ -154,6 +170,9 @@ def split_imu_datasets(db_path: str, train_split: float = 0.8, **kwargs) -> tupl
     temp_ds = IMUDataset(db_path, **kwargs)
     all_anchors = temp_ds.anchors
     
+    if seed:
+        np.random.seed(seed)
+        
     np.random.shuffle(all_anchors)
     
     split_idx = int(len(all_anchors) * train_split)
